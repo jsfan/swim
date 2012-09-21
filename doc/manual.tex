@@ -1,0 +1,415 @@
+\documentclass[11pt,a4paper,openright,twoside]{book}
+
+\setlength{\marginparwidth}{0pt}
+\setlength{\parindent}{0mm}
+\addtolength{\parskip}{\baselineskip}
+\setlength{\evensidemargin}{0pt}
+\setlength{\oddsidemargin}{70pt}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage[round]{natbib}
+\usepackage{float}
+\usepackage{placeins}
+\usepackage{setspace}
+
+\newcommand{\dd}{\partial}
+\newcommand{\half}{\frac{1}{2}}
+\newcommand{\ddt}[1]{\frac{d #1}{dt}}
+\newcommand{\pd}[2]{\frac{\partial #1}{\partial #2}}
+\newcommand{\pdt}[1]{\frac{\partial #1}{\partial t}}
+\newcommand{\thecodenospace}{SWiM}
+\newcommand{\thecode}{\thecodenospace{ }}
+\newcommand{\grad}{\mathbf{\nabla}}
+
+% reduce probability of widows and orphans
+\widowpenalty=5000
+\clubpenalty=5000
+
+% make line break after operators in math mode impossible
+\binoppenalty=10000
+\relpenalty=10000
+
+\setlength{\parskip}{2.5ex plus 1.5ex minus 1.5ex}
+
+\begin{document}
+
+\title{SWiM - a SISL shallow water model\\Manual}
+\author{Christian Lerrahn}
+\date{August 2012}
+\maketitle
+
+\tableofcontents
+
+\section{\thecode Manual}
+
+\section{Prerequisites and Build Process}
+\thecode is written in Fortran 90. It was developed on GNU Fortran (\texttt{gfortran}) but has been tested in Intel Fortran
+and should compile on any Fortran 90 compiler. It links against the NetCDF library\footnote{\textit{http://www.unidata.ucar.edu/software/netcdf/}} and requires the NetCDF Fortran module (compiled with the same compiler).
+It also statically links against the library sigwatch \footnote{\textit{http://nxg.me.uk/dist/sigwatch/}} to catch system signals.
+
+To build \thecode you might have to adjust \texttt{Makefile} to your system because \thecode currently does not use
+\texttt{autotools}. You can then just build the binary with a simple \texttt{make}. To build the debug mode binary
+(output ghost cells, bounds-checking), you can run \texttt{make debug} or \texttt{make all} to build both binaries at once.
+
+\section{Code structure}
+\thecode consists of several modules which are explained in detail in Tab.~\ref{modules}. The main routine can be found in
+the file \texttt{swim.f90}.
+
+\begin{table}[H]
+  \begin{tabular}{p{25mm}p{30mm}p{60mm}}
+    \textbf{Module Name} & \textbf{File Name} & \textbf{Description} \\
+    \texttt{grid} & \texttt{grid.f90} & Sets up the grid structure and contains routines that are related to the grid like filling ghost cells, setting the off-centring profile, calculating the time step and finding the maximum orography gradient.\\
+    \texttt{helpers} & \texttt{helpers.f90} & Helper routines like interpolation, finding departure points, transform coordinates to grid coordinates and calculate derivatives.\\
+    \texttt{init} & \texttt{init.f90} & Usually only contains the initialisation routines. For more details refer to section~\ref{init-routine}.\\
+    \texttt{tests} & \texttt{tests.f90} & Routines to calculate exact solutions. For more details refer to section~\ref{test-routines}.\\
+    \texttt{input} & \texttt{input.f90} & Handles input from configuration, initialisation and resume files. \\
+    \texttt{integration} & \texttt{integration.f90} & All the equations are solved here.\\
+    \texttt{localconfig} & \texttt{localconFig.f90} & Allows the main routine and the signal handler (module \texttt{sighandler}) to exchange some information.\\
+    \texttt{output} & \texttt{output.f90} & Handles all output to the NetCDF files (output and resume).\\
+    \texttt{output\_debug} & \texttt{output\_debug.f90} & A copy of the module \texttt{output} but writes the ghost cells to the NetCDF output file as well. The target \texttt{debug} in the makefile uses this module and builds a binary called \texttt{swim-debug}.\\
+    \texttt{sighandler} & \texttt{sighandler.f90} & Handles system signals to guarantee clean shutdown on terminate signal.
+  \end{tabular}
+  \caption{Modules in \thecode}
+  \label{modules}
+\end{table}
+
+If you want to add global variables to the code, in most cases these should be placed in the module \texttt{grid}. This module
+is included by almost all other modules.
+
+\section{Configuration options for \thecode}
+\begin{tabular}{p{45mm}p{75mm}}
+  \texttt{adaptive\_timestep} & Set to 1 if time step should be adapted to the prescribed Courant number in every time step. Does not work with option \texttt{dt}.\\
+  \texttt{alpha1} & Off-centring parameter for height terms in momentum equations. Only has an effect if \texttt{offcentring} is set.\\
+  \texttt{alpha2} & Off-centring parameter for Coriolis terms in momentum equations. Only has an effect if \texttt{offcentring} is set.\\
+  \texttt{alpha3} & Off-centring parameter for momentum terms in height equation. Only has an effect if \texttt{offcentring} is set.\\
+  \texttt{alpha\_search\_radius} & Sets the radius in which the largest gradient should be found as a basis for the local off-centring parameters. Only has an effect if \texttt{variable\_alpha} is set.\footnotemark[1]\\
+  \texttt{cell\_size\_x} & Grid cell size in x in meters.\\
+  \texttt{cell\_size\_y} & Grid cell size in y in meters.
+\end{tabular}
+\footnotetext[1]{For technical reasons, \thecode enforces that the search radius is no larger than the number of ghost cells decremented by one. This ensures that the search algorithm will not try to look for orography values beyond the grid in memory. However, there is no lower limit for the search radius with a value of zero meaning that only the local gradients (i.e. the gradients with the four nearest neighbours) are used. This maximum value is also the default.}
+\newpage
+\begin{tabular}{p{45mm}p{75mm}}
+  \texttt{coriolis\_parameter} & Coriolis parameter for used f-plane. Can also be set as a latitude. Options \texttt{coriolis\_parameter} and \texttt{latitude} are mutually exclusive.\\
+  \texttt{courant\_number} & Prescribed maximum Courant number. If \texttt{adaptive\_timestep} is set, time step will always be adapted to keep maximum Courant number at this value. Without \texttt{adaptive\_timestep} initial time step will be determined from this Courant number and initial conditions. Model will then be run with constant time step.\\
+  \texttt{departure\_points} & Algorithm to use to find departure points. If unset, algorithm according to \citep[p. 15]{McGregor04} is used. If set, algorithm according to \citep{StaniforthCote91} will be used. Please refer to section~\ref{departure-points} for more details. Options \texttt{courant\_number} and \texttt{dt} are mutually exclusive.\\
+  \texttt{dt} & Set fixed time step in seconds. Options \texttt{courant\_number} and \texttt{dt} are mutually exclusive.
+\end{tabular}
+\newpage
+\begin{tabular}{p{45mm}p{75mm}}
+  \texttt{ghostcells} & Number of ghost cells\footnotemark[2] to use. If \texttt{variable\_alpha} is set, this is also the radius (in grid cells) to consider for orography gradient to determine local off-centring parameters.\\
+  \texttt{grid\_height} & Number of grid cells in y.\\
+  \texttt{grid\_width} & Number of grid cells in x.\\
+  \texttt{init\_from\_file} & If set, file in \texttt{resume} will be used for initialisation instead of resume.\\
+  \texttt{iterations} & Number of iterations to run the model for. If used together with \texttt{max\_time}, model run will stop whenever either condition is met.\\
+  \texttt{latitude} &  Options \texttt{coriolis\_parameter} and \texttt{latitude} are mutually exclusive.\\
+  \texttt{max\_time} & Maximum model time to run in seconds. If used together with \texttt{iterations}, model run will stop whenever either condition is met.\\
+  \texttt{mean\_height} & Mean height $\overline{\varphi}$ for linearised height equation.\\
+  \texttt{offcentring} & Switches off-centring on. Without setting this switch, settings for \texttt{alphaX} have no effect.
+\end{tabular}
+\footnotetext[2]{The term ghost cells refers to copies of grid points near the boundary which artificially enlarge the domain to allow for a simple handling of the periodic boundaries.}
+\newpage
+\begin{tabular}{p{45mm}p{75mm}}
+  \texttt{orography\_type} & Determines the way the orographic forcing is done in the equations. Default is as in \cite{Rivest94}. If set, orographic forcing as in \cite{Pedlosky} is used. Please refer to section~\ref{shallow-water-code} for details.\\
+  \texttt{output\_interval} & Output frequency in time steps. Variables $u(x,y,t)$, $v(x,y,t)$, $\varphi(x,y,t)$ and $\alpha_n(x,y,t)$ will be written to output file.\\
+  \texttt{output\_time\_interval} & Output frequency in seconds. Variables $u(x,y,t)$, $v(x,y,t)$, $\varphi(x,y,t)$ and $\alpha_n(x,y,t)$ will be written to output file. Overrides \texttt{output\_interval}.\\
+  \texttt{outputfile} & Name of output file.\\
+  \texttt{resume} & File to resume from. If the file contains only data for one time step, the model will be initialised with that data instead.\\
+  \texttt{resume\_point\_interval} & Number of time steps between writing resume files. Also see \texttt{resume} for naming scheme of resume files.\\
+  \texttt{resume\_file\_base} & Name base for resume files. Resume file number and \texttt{.nc} will be appended. Defaults to \it{resume} with resume files being called \texttt{resumeXXXXXX.nc}.\\ 
+  \texttt{variable\_alpha} & If set, $\alpha_n$ will be variable over the computational domain as described in section~\ref{variable-offcentring-code}.
+\end{tabular}
+
+\section{Command line options}
+All command line options except for the option that sets the configuration file have equivalents in the configuration file. As Fortran 90
+comes without an implementation of \texttt{getopt}, the implementation for command line options is rather frail and does only accept
+command line options that are specified as
+
+\begin{verbatim}
+-x <value>
+--option-x <value>
+\end{verbatim}
+
+but not ones that are specified without a space between the option and the value or using an equals sign between the option and value.
+
+The accepted options are
+
+\begin{tabular}{p{60mm}p{55mm}}
+  \texttt{-c}, \texttt{--config-file} & Name and path of configuration file.\\
+  \texttt{-o}, \texttt{--output-file} & Name and path of output file. Cf. variable \texttt{output\_file} in configuration file.\\
+  \texttt{-n}, \texttt{--iterations} & Number of iterations. Cf. variable \texttt{iterations} in configuration file.
+\end{tabular}
+\newpage
+\begin{tabular}{p{60mm}p{55mm}}
+  \texttt{-t}, \texttt{--max-time} & Amount of model time to run the model for. Cf. variable \texttt{max\_time} in configuration file.\\
+  \texttt{-l}, \texttt{--output-interval} & Interval (in time steps) in which output is written. Cf. variable \texttt{output\_interval} in configuration file.\\
+  \texttt{-r}, \texttt{--resume-points} & How often to write resume files. Cf. variable \texttt{resume\_point\_interval} in configuration file.\\ 
+  \texttt{-i}, \texttt{--from-file} & Name and path of file to resume or initialise from. Cf. variable \texttt{resume} in configuration file.\\
+\end{tabular}
+
+and the switch
+
+\begin{tabular}{p{60mm}p{55mm}}
+  \texttt{-nr}, \texttt{--new-run} & Sets the \texttt{init\_from\_file} flag.\\
+\end{tabular}
+
+\thecode is usually invoked as
+
+\begin{verbatim}
+    ./swim [<options and switches>]
+\end{verbatim}
+
+Either a maximum model time or a maximum number of iterations and an output interval have to be set either in the
+configuration file or on the command line. All other settings are optional as long as they are not required
+by another option already set. \thecode should always throw an error and exit if the configuration is inconsistent.
+
+\section{Off-centring}
+The off-centring parameters can an have to be set independently. If off-centring is switched on (switch \texttt{offcentring},
+all three off-centring parameters are expected in the config file. If they aren't found, they default to $0.5$ (centred).
+
+For the variable off-centring scheme, a search radius can be defined in \texttt{alpha\_search\_radius}.
+If \texttt{alpha\_search\_radius} is not set, the search radius is set equal to the number of configured ghost cells decremented by one. This value is also the maximum search radius that can be set for technical reasons. Any search radius larger than
+this number will be lowered to the maximum.
+
+\section{Initialisation and Restart}
+\subsection{Initialisation}
+\thecode model runs are initialised either by the function \texttt{initialise\_grid} in the module \texttt{init} or from a
+file. If the model run is initialised from a file, the file has to be in NetCDF format and contain at least the variables
+\texttt{u}, \texttt{v}, \texttt{phi} and \texttt{phioro}. All other model parameters need to be defined in the configuration
+file or on the command line. The NetCDF file needs to have at least the dimensions \texttt{x} and \texttt{y}. An extra
+dimension \texttt{t} is ignored with the initialisation data read from the first time step in the file.
+
+If the resolution of the initialisation data do not match the resolution set in the model configuration, the input data are
+assimilated using bi-cubic interpolation. Assimilation is possible from both higher and lower resolution in the input data.
+
+If initialisation is to be executed by the model code (as opposed to initialisation from file), only the subroutine
+\texttt{initialise\_grid} in module \texttt{init} needs to be modified.
+
+\section{Initialisation routine}
+\label{init-routine}
+If you want to replace the initialisation routine, you need to replace the routine \texttt{initialise\_grid} in the module
+\texttt{init} (file \texttt{init.f90}). The following shows the signature and first lines of the routine. All physical
+variables set in the configuration file are available in the module. The parameter \texttt{test} is explicitly passed to the
+routine \texttt{initialise\_grid}.
+
+\begin{verbatim}
+module init
+
+  use grid
+
+  implicit none
+
+contains
+
+  !> Initialises the grid.
+  !> @param testcase Testcase to run (if configured)
+  subroutine initialise_grid(testcase)
+
+    integer :: i
+    integer :: j
+    integer :: testcase
+
+    ! allocate arrays
+    allocate(x(xdim+2*gc))
+    allocate(y(ydim+2*gc))
+    allocate(uold(xdim+2*gc,ydim+2*gc))
+    allocate(vold(xdim+2*gc,ydim+2*gc))
+    allocate(phiold(xdim+2*gc,ydim+2*gc))
+    allocate(u(xdim+2*gc,ydim+2*gc))
+    allocate(v(xdim+2*gc,ydim+2*gc))
+    allocate(phi(xdim+2*gc,ydim+2*gc))
+    allocate(exact(xdim+2*gc,ydim+2*gc))
+    allocate(unew(xdim+2*gc,ydim+2*gc))
+    allocate(vnew(xdim+2*gc,ydim+2*gc))
+    allocate(phinew(xdim+2*gc,ydim+2*gc))
+    allocate(phioro(xdim+2*gc,ydim+2*gc))
+    allocate(alpha(xdim+2*gc,ydim+2*gc,2,3))
+    allocate(epsilon(xdim+2*gc,ydim+2*gc,3))
+    ...
+\end{verbatim}
+
+\subsubsection{Restart}
+Models can be configured to regularly write restart files which can then be used to initialise a new model run with. While
+initialisation will only read data for one time step and start from these initial conditions, a restart reads two time levels
+and a time step $\Delta t$. In principle, restarts are performed the same way as initialisations, just that they read in two
+time levels. The NetCDF file therefore has to have a dimension \texttt{t} and at least data for two time levels. If more than
+two time steps are found in the file, the first two will be used. The starting time is set to the time found in the restart
+file.
+
+\section{Tests}
+\label{test-routines}
+The main routine calls a routine \texttt{exact\_solution(test)} which is expected to be found in module \texttt{tests}. The
+parameter passed is the parameter \texttt{test} from the configuration file. This parameter can be used to distinguish
+between different test cases in the initialisation routines and the routine to calculate an exact solution.
+
+\section{Output format}
+\thecode writes to NetCDF files. The output and resume files are identical in structure and have a structure as follows.
+
+\begin{verbatim}
+netcdf swim {
+dimensions:
+        x = ... ;
+        y = ... ;
+        t = UNLIMITED ; // (... currently)
+variables:
+        double t(t) ;
+        double x(x) ;
+        double y(y) ;
+        double phibar ;
+        double latitude ;
+        double phioro(x, y) ;
+        double u(t, x, y) ;
+        double v(t, x, y) ;
+        double phi(t, x, y) ;
+        double exact(t, x, y) ;
+        double epsilon1(t, x, y) ;
+        double epsilon2(t, x, y) ;
+        double epsilon3(t, x, y) ;
+}
+\end{verbatim}
+
+Initialisation and resume files are expected to have this structure, too. However, \textit{x}, \textit{y}, \textit{phibar}
+and \textit{latitude} will not be read from the NetCDF file but are expected to be found in the configuration file.
+
+\section{Plotting Scripts}
+\thecode comes with several plotting scripts which are all written in Python. They use the python modules matplotlib,
+pyplot, numpy, getopt and sys. NetCDF is handled using the NIO library but the scripts also contain commented out
+lines of code which use the Scientific.IO.NetCDF library instead. All scripts have very similar APIs.
+
+
+\subsection{epsilon-plot.py}
+The script \texttt{epsilon-plot.py} plots the 2D profile for the off-centring parameters. Only useful in the case of
+variable off-centring.
+
+\begin{verbatim}
+Usage: epsilon-plot.py [<options>] <NetCDF file>
+        --minval        Minimum value for colour scale
+        --maxval        Maximum value for colour scale
+        -d,--dynamic    Off-centring is dynamic => plot maps
+                        for every time step
+        -t, --transpose transpose value matrix before plotting
+        -p, --prefix    prefix for output files
+\end{verbatim}
+
+\subsection{oroplot.py}
+The script \texttt{oroplot.py} plots the 2D profile of the orography.
+
+\begin{verbatim}
+Usage: oroplot.py [<options>] <NetCDF file>
+        --minval        Minimum value for colour scale
+        --maxval        Maximum value for colour scale
+        -t, --transpose transpose value matrix before plotting
+        -p, --prefix    prefix for output files
+\end{verbatim}
+
+\subsection{oroplot-slice.py}
+The script \texttt{oroplot-slice.py} plots a 1D slice through the orography.
+
+\begin{verbatim}
+Usage: oroplot-slice.py [<options>] <NetCDF file> \
+                        <dimension (x/y)>
+        --minval        Minimum value for colour scale
+        --maxval        Maximum value for colour scale
+        -p, --prefix    prefix for output files
+        -c, --position= position to slice through 2D field
+\end{verbatim}
+
+\newpage
+\subsection{swimplot.py}
+The script \texttt{swimplot.py} plots any time dependent value from \thecodenospace's\\
+NetCDF file.
+
+\begin{verbatim}
+Usage: swimplot.py [<options>] <NetCDF file>
+                                  <time dependent variable>
+        --colour-min=<minimum value>    Minimum of colour
+                                        scale (white if under),
+                                        implies --minval
+        --colour-max=<maximum value>    Maximum of colour
+                                        scale (black if over),
+                                        implies --maxval
+        -d=<time dependent variable>,
+        --diff=<time dependent variable>  Plot difference
+                               <main variable>-<this variable>
+        -i, --interactive       Plot interactively
+                                   (requires X)
+        --minval=<minimum value>        Minimum value for
+                                        colour scale
+        --maxval=<maximum value>        Maximum value for
+                                        colour scale
+        --minx=<minimum value>  Minimum coordinate in x
+                                (default: 0)
+        --maxx=<maximum value>  Maximum coordinate in x
+                                (default: full)
+        --miny=<minimum value>  Minimum coordinate in y
+                                (default: 0)
+        --maxy=<maximum value>  Maximum coordinate in y
+                                (default: full)
+        -n, --dry-run   Do not plot anything.
+        -t, --transpose Transpose value matrix before plotting
+        -p, --prefix=<prefix>   Prefix for output files
+        --quiver=<scale factor> Overlay with quiver plot of
+                                velocity (scale with factor)
+        -x <xmin-xmax>  Range in x to plot
+                        (equivalent to --minx and --maxx)
+        -y <ymin-ymax>  Range in y to plot
+                        (equivalent to --miny and --maxy)
+\end{verbatim}
+
+\subsection{swimplot-slice.py}
+The script \texttt{swimplot-slice.py} plots a 1D slice through any time dependent value from \thecodenospace's NetCDF file.
+ 
+\begin{verbatim}
+Usage: swimplot-slice.py [<options>] <NetCDF file>
+                         <time dependent variable>
+                         <dimension (x/y)>
+        --minval        Minimum value for colour scale
+        --maxval        Maximum value for colour scale
+        -p, --prefix    prefix for output files
+        -c, --position= position to slice through 2D field
+        -n, --dry-run\t do not actually run plot but only
+                        determine scale
+\end{verbatim}
+
+\subsection{swimplot-vorticity.py}
+The script \texttt{swimplot-vorticity.py} calculates the total absolute vorticity in the domain as
+\begin{eqnarray}
+  \omega_\mathrm{tot} = \sum_\mathrm{domain} |\partial_x v - \partial_y u|
+\end{eqnarray}
+
+and plots the total absolute vorticity function for every NetCDF file passed to the script. The
+passed labels are output to the generated figure's legend.
+
+\begin{verbatim}
+Usage: swimplot-vorticity.py [<options>] <NetCDF file> <label>
+                                   [<NetCDF file> <label> ...]
+        -c              Use colour (default is monochrome)
+        --minval        Minimum value for colour scale
+        --maxval        Maximum value for colour scale
+        -p, --prefix    prefix for output files
+        -n, --dry-run   do not actually run plot
+                        but only determine scale
+\end{verbatim}
+
+\subsection{swimplot-energy.py}
+The script \texttt{swimplot-energy.py} calculates the kinetic energy per unit mass in the domain as
+\begin{eqnarray}
+  E_\mathrm{kin} = \sum_\mathrm{domain} \frac{1}{2}\left(u^2+v^2\right)
+\end{eqnarray}
+
+and plots the kinetic energy per unit mass for every NetCDF file passed to the script. The
+passed labels are output to the generated figure's legend.
+
+\begin{verbatim}
+Usage: swimplot-energy.py [<options>] <NetCDF file> <label>
+                                   [<NetCDF file> <label> ...]
+        -c              Use colour (default is monochrome)
+        --minval        Minimum value for colour scale
+        --maxval        Maximum value for colour scale
+        -p, --prefix    prefix for output files
+        -n, --dry-run   do not actually run plot
+                        but only determine scale
+\end{verbatim}
+
+\end{document}

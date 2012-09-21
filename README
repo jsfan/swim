@@ -1,0 +1,26 @@
+SWiM - a semi-Lagrangian, semi-implicit shallow water model
+===========================================================
+
+(C) 2008-2012 by Christian Lerrahn
+
+What is SWiM
+------------
+SWiM is a Cartesian model which solves the linearised shallow water equations
+with an orography. It uses a bi-periodic domain and an f-plane.
+
+SWiM was written in Fortran 90 and is modularised into the logical components
+involved in configuring, integration and output. It comes with alternative
+algorithms for calculating back-trajectories and including orographic forcing.
+However, not always are all alternatives thoroughly tested.
+
+All Fortran code in SWiM should be documented in Doxygen syntax, so you can
+create the documents in your favourite format using Doxygen (or any compatible
+processor).
+
+A number of plotting and post-processing scripts are included in the
+repository. Unfortunately, these are currently undocumented but hopefully some
+documentation will follow.
+
+SWiM was developed as part of a PhD project. At a later date, a link to the
+PhD thesis will be added. The PhD thesis also contains a SWiM manual in its
+appendix and provides useful references to a number of publications.
